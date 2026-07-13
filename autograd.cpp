@@ -5,6 +5,7 @@
 using namespace std;
 
 
+
 //Operations
 class Node {
     public:
@@ -16,9 +17,7 @@ class Node {
         double val;
         virtual void backward(double upstream, bool output = false){}
         ~Node(){
-            for (Node* i : inputs){
-                delete i;
-            }
+            inputs.clear();
         }
 };
 
@@ -170,15 +169,23 @@ class tanhNode : public Node {
             }
         }
 };
+
+vector<Node*> global_tape;
 Node& operator*(Node& x, Node& y){
     Node* x3 = new MultNode(x, y);
+    global_tape.push_back(x3);
     return *x3;
 }
 Node& operator+(Node& x, Node& y){
     Node* x2 = new AddNode(x, y);
+    global_tape.push_back(x2);
     return *x2;
 }
-
+void destroy(){
+    for (Node* i : global_tape){
+        delete i;
+    }
+}
 int main(){
     ParamNode a(3);
     ParamNode b(4);
@@ -189,8 +196,6 @@ int main(){
     Node& f = d+e;
     f.backward(1, true);
     cout<<b.d_loss;
-
-    delete &d;
-    delete &e;
-    delete &f;
+    
+    destroy();
 }
