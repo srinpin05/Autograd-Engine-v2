@@ -2,6 +2,7 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
+#include <algorithm>
 using namespace std;
 
 
@@ -10,17 +11,29 @@ using namespace std;
 class Node {
     public:
         vector<Node*> inputs;
+        static vector<Node*> visited;
         bool param = false;
         double d_loss = 0;
         int forward_count = 0;
         int backward_count = 0;
+        bool visit = false;
         double val;
         virtual void backward(double upstream, bool output = false){}
+        virtual void propogate(){} //helper function to push local gradient down to inputs.
         ~Node(){
             inputs.clear();
         }
+        void walk(Node* root){
+            if (root->visit){return;}
+            root->visit = true; 
+            for (Node* i : root->inputs){
+                walk(i);
+            }
+            visited.push_back(root);
+    
+        }
 };
-
+vector<Node*> Node::visited;
 class ParamNode : public Node{
     public: 
         ParamNode(int value){
@@ -29,7 +42,6 @@ class ParamNode : public Node{
         }
         void backward(double upstream, bool output = false){
             d_loss += upstream;
-
         }
 };
 
@@ -47,14 +59,19 @@ class AddNode : public Node{
             }
         }
         void backward(double upstream, bool output = false){
-            backward_count++;
+            double grad;
             d_loss += upstream;
-            if (backward_count == forward_count || output == true){
-                double grad;
-                for (int i = 0; i<inputs.size();i++){
-                    grad = 1;
-                    inputs[i]->backward(d_loss*grad);
-                }
+            walk(this);
+            reverse(visited.begin(), visited.end());
+            for (Node* node : visited){
+                node->propogate();
+            }
+        }
+        void propogate(){
+            double grad;
+            for (int i = 0; i<inputs.size();i++){
+                grad = 1;
+                inputs[i]->d_loss += d_loss*grad;
             }
         }
 };
@@ -73,19 +90,24 @@ class MultNode : public Node{
         }
 
         void backward(double upstream, bool output = false){
-            backward_count++;
             d_loss += upstream;
-            if (forward_count == backward_count || output == true){
-                double grad;
-                for (int i = 0; i<inputs.size();i++){
-                    grad = 1;
-                    for (int j = 0; j<inputs.size();j++){
-                        if (i!=j){
-                            grad *= inputs[j]->val;
-                        }
+            double grad;
+            walk(this);
+            reverse(visited.begin(), visited.end());
+            for (Node* node : visited){
+                node->propogate();
+            }
+        }
+        void propogate(){
+            double grad;
+            for (int i = 0; i<inputs.size();i++){
+                grad = 1;
+                for (int j = 0; j<inputs.size();j++){
+                    if (i!=j){
+                        grad *= inputs[j]->val;
                     }
-                    inputs[i]->backward(d_loss*grad);
                 }
+                inputs[i]->d_loss += d_loss*grad;
             }
         }
 };
@@ -98,16 +120,20 @@ class LogNode : public Node {
             val = log(x.val);
         }
         void backward(double upstream, bool output = false){
-            backward_count++;
             d_loss+=upstream;
-            if (forward_count == backward_count || output){ 
-                double grad;
-                for (int i = 0; i < inputs.size(); i++){
-                    grad = 1/inputs[i]->val;
-                    inputs[i]->backward(d_loss*grad);
-                }
+            walk(this);
+            reverse(visited.begin(), visited.end());
+            for(Node* node : visited){
+                node->propogate();
             }
         } 
+        void propogate(){
+            double grad;
+            for (int i = 0; i < inputs.size(); i++){
+                grad = 1/inputs[i]->val;
+                inputs[i]->d_loss += d_loss*grad;
+            }
+        }
 };
 
 class SigmoidNode : public Node {
@@ -118,14 +144,18 @@ class SigmoidNode : public Node {
             val = 1/(1+exp(0-x.val));
         }
         void backward(double upstream, bool output = false){
-            backward_count++;
             d_loss += upstream;
-            if (forward_count == backward_count || output == true){
-                double grad;
-                for (int i = 0; i < inputs.size(); i++){
-                    grad = val*(1-val);
-                    inputs[i]->backward(d_loss*grad);
-                }
+            walk(this);
+            reverse(visited.begin(), visited.end());
+            for (Node* node : visited){
+                node->propogate();
+            }
+        }
+        void propogate(){
+            double grad;
+            for (int i = 0; i < inputs.size(); i++){
+                grad = val*(1-val);
+                inputs[i]->d_loss += d_loss*grad;
             }
         }
 };
@@ -138,14 +168,18 @@ class ReLUNode : public Node {
             val = (x.val>0) ? x.val : 0;
         }
         void backward(double upstream, bool output = false){
-            backward_count++;
             d_loss += upstream;
-            if (forward_count == backward_count || output){
-                double grad;
-                for (int i = 0; i<inputs.size(); i++){
-                    grad = (inputs[i]->val <= 0) ? 0 : 1;
-                    inputs[i]->backward(d_loss*grad);
-                }
+            walk(this);
+            reverse(visited.begin(), visited.end());
+            for (Node* node : visited){
+                node->propogate();
+            }
+        }
+        void propogate(){
+            double grad;
+            for (int i = 0; i<inputs.size(); i++){
+                grad = (inputs[i]->val <= 0) ? 0 : 1;
+                inputs[i]->d_loss += d_loss*grad;
             }
         }
 };
@@ -158,33 +192,29 @@ class tanhNode : public Node {
             val = tanh(x.val);
         }
         void backward(double upstream, bool output = false){
-            backward_count++;
             d_loss+=upstream;
-            if (forward_count == backward_count || output){
-                double grad;
-                for (int i = 0; i<inputs.size(); i++){
-                    grad = 1-val*val;
-                    inputs[i]->backward(d_loss*grad);
-                }
+            walk(this);
+            reverse(visited.begin(), visited.end());
+            for(Node* node : visited){
+                node->propogate();
+            }
+        }
+        void propogate(){
+            double grad;
+            for (int i = 0; i<inputs.size(); i++){
+                grad = 1-val*val;
+                inputs[i]->d_loss += d_loss*grad;
             }
         }
 };
 
-vector<Node*> global_tape;
 Node& operator*(Node& x, Node& y){
     Node* x3 = new MultNode(x, y);
-    global_tape.push_back(x3);
     return *x3;
 }
 Node& operator+(Node& x, Node& y){
     Node* x2 = new AddNode(x, y);
-    global_tape.push_back(x2);
     return *x2;
-}
-void destroy(){
-    for (Node* i : global_tape){
-        delete i;
-    }
 }
 int main(){
     ParamNode a(3);
@@ -196,6 +226,4 @@ int main(){
     Node& f = d+e;
     f.backward(1, true);
     cout<<b.d_loss;
-    
-    destroy();
 }
