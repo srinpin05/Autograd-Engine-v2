@@ -21,7 +21,6 @@ class Node {
         virtual void backward(double upstream, bool output = false){}
         virtual void propogate(){} //helper function to push local gradient down to inputs.
         ~Node(){
-            inputs.clear();
         }
         void walk(Node* root){
             if (root->visit){return;}
@@ -31,6 +30,10 @@ class Node {
             }
             visited.push_back(root);
     
+        }
+        void reset(){
+            d_loss = 0;
+            visited.clear();
         }
 };
 vector<Node*> Node::visited;
@@ -207,15 +210,24 @@ class tanhNode : public Node {
             }
         }
 };
-
+vector<Node*> global;
 Node& operator*(Node& x, Node& y){
     Node* x3 = new MultNode(x, y);
+    global.push_back(x3);
     return *x3;
 }
 Node& operator+(Node& x, Node& y){
     Node* x2 = new AddNode(x, y);
+    global.push_back(x2);
     return *x2;
 }
+void destroy(){
+    for (Node* node : global){
+        delete node;
+    }
+    global.clear();
+}
+
 int main(){
     ParamNode a(3);
     ParamNode b(4);
@@ -226,4 +238,5 @@ int main(){
     Node& f = d+e;
     f.backward(1, true);
     cout<<b.d_loss;
+    destroy();
 }
