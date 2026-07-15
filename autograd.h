@@ -1,17 +1,17 @@
-#include <stdlib.h>
-#include <iostream>
-#include <vector>
+#ifndef AUTOGRAD_H
+#define AUTOGRAD_H
+
+
 #include <cmath>
+#include <vector>
 #include <algorithm>
+
 using namespace std;
 
-
-
-//Operations
 class Node {
     public:
         vector<Node*> inputs;
-        static vector<Node*> visited;
+        vector<Node*> visited;
         bool param = false;
         double d_loss = 0;
         int forward_count = 0;
@@ -20,8 +20,7 @@ class Node {
         double val;
         virtual void backward(double upstream, bool output = false){}
         virtual void propogate(){} //helper function to push local gradient down to inputs.
-        ~Node(){
-        }
+        virtual ~Node(){}
         void walk(Node* root){
             if (root->visit){return;}
             root->visit = true; 
@@ -32,14 +31,16 @@ class Node {
     
         }
         void reset(){
-            d_loss = 0;
+            for(Node* node : visited){
+                node->d_loss = 0;
+                node->visit = false;
+            }
             visited.clear();
         }
 };
-vector<Node*> Node::visited;
 class ParamNode : public Node{
     public: 
-        ParamNode(int value){
+        ParamNode(double value){
             param = true;
             val = value;
         }
@@ -62,6 +63,7 @@ class AddNode : public Node{
             }
         }
         void backward(double upstream, bool output = false){
+            reset();
             double grad;
             d_loss += upstream;
             walk(this);
@@ -93,6 +95,7 @@ class MultNode : public Node{
         }
 
         void backward(double upstream, bool output = false){
+            reset();
             d_loss += upstream;
             double grad;
             walk(this);
@@ -123,6 +126,7 @@ class LogNode : public Node {
             val = log(x.val);
         }
         void backward(double upstream, bool output = false){
+            reset();
             d_loss+=upstream;
             walk(this);
             reverse(visited.begin(), visited.end());
@@ -147,6 +151,7 @@ class SigmoidNode : public Node {
             val = 1/(1+exp(0-x.val));
         }
         void backward(double upstream, bool output = false){
+            reset();
             d_loss += upstream;
             walk(this);
             reverse(visited.begin(), visited.end());
@@ -171,6 +176,7 @@ class ReLUNode : public Node {
             val = (x.val>0) ? x.val : 0;
         }
         void backward(double upstream, bool output = false){
+            reset();
             d_loss += upstream;
             walk(this);
             reverse(visited.begin(), visited.end());
@@ -195,6 +201,7 @@ class tanhNode : public Node {
             val = tanh(x.val);
         }
         void backward(double upstream, bool output = false){
+            reset();
             d_loss+=upstream;
             walk(this);
             reverse(visited.begin(), visited.end());
@@ -210,6 +217,8 @@ class tanhNode : public Node {
             }
         }
 };
+
+
 vector<Node*> global;
 Node& operator*(Node& x, Node& y){
     Node* x3 = new MultNode(x, y);
@@ -221,22 +230,11 @@ Node& operator+(Node& x, Node& y){
     global.push_back(x2);
     return *x2;
 }
+
 void destroy(){
     for (Node* node : global){
         delete node;
     }
     global.clear();
 }
-
-int main(){
-    ParamNode a(3);
-    ParamNode b(4);
-    ParamNode c(5);
-
-    Node& d = a+b;
-    Node& e = d*b;
-    Node& f = d+e;
-    f.backward(1, true);
-    cout<<b.d_loss;
-    destroy();
-}
+#endif
