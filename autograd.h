@@ -5,8 +5,10 @@
 #include <cmath>
 #include <vector>
 #include <algorithm>
+#include <Eigen/Dense>
 
 using namespace std;
+using namespace Eigen;
 
 class Node {
     public:
@@ -17,6 +19,7 @@ class Node {
         int forward_count = 0;
         int backward_count = 0;
         bool visit = false;
+        bool requires_grad = true; 
         double val;
         virtual void backward(double upstream, bool output = false){}
         virtual void propogate(){} //helper function to push local gradient down to inputs.
@@ -40,9 +43,10 @@ class Node {
 };
 class ParamNode : public Node{
     public: 
-        ParamNode(double value){
+        ParamNode(double value, bool requires_grad = true){
             param = true;
             val = value;
+            this->requires_grad = requires_grad;
         }
         void backward(double upstream, bool output = false){
             d_loss += upstream;
@@ -53,10 +57,8 @@ class ParamNode : public Node{
 class AddNode : public Node{
     public:
         AddNode(Node& x, Node& y){
-            inputs.push_back(&x);
-            x.forward_count++;
-            inputs.push_back(&y);
-            y.forward_count++;
+            if (x.requires_grad) inputs.push_back(&x);
+            if (y.requires_grad) inputs.push_back(&y);
             val = 0;
             for (int i = 0; i<inputs.size();i++){
                 val += inputs[i]->val;
@@ -84,9 +86,8 @@ class AddNode : public Node{
 class MultNode : public Node{
     public:
         MultNode(Node& x, Node& y){
-            inputs.push_back(&x);
-            x.forward_count++;
-            inputs.push_back(&y);
+            if (x.requires_grad) inputs.push_back(&x);
+            if (y.requires_grad) inputs.push_back(&y);
             y.forward_count++;
             val = 1;
             for (int i = 0; i<inputs.size();i++){
@@ -121,8 +122,7 @@ class MultNode : public Node{
 class LogNode : public Node {
     public:
         LogNode(Node& x) {
-            inputs.push_back(&x);
-            x.forward_count += 1;
+            if (x.requires_grad) inputs.push_back(&x);
             val = log(x.val);
         }
         void backward(double upstream, bool output = false){
@@ -146,8 +146,7 @@ class LogNode : public Node {
 class SigmoidNode : public Node {
     public:
         SigmoidNode(Node& x){
-            inputs.push_back(&x);
-            x.forward_count++;
+            if (x.requires_grad) inputs.push_back(&x);
             val = 1/(1+exp(0-x.val));
         }
         void backward(double upstream, bool output = false){
@@ -171,8 +170,7 @@ class SigmoidNode : public Node {
 class ReLUNode : public Node {
     public:
         ReLUNode(Node& x){
-            inputs.push_back(&x);
-            x.forward_count++;
+            if (x.requires_grad) inputs.push_back(&x);
             val = (x.val>0) ? x.val : 0;
         }
         void backward(double upstream, bool output = false){
@@ -196,8 +194,7 @@ class ReLUNode : public Node {
 class tanhNode : public Node {
     public:
         tanhNode(Node& x){
-            inputs.push_back(&x);
-            x.forward_count++;
+            if (x.requires_grad) inputs.push_back(&x);
             val = tanh(x.val);
         }
         void backward(double upstream, bool output = false){
