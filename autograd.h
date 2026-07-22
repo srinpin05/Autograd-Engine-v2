@@ -9,7 +9,7 @@
 
 using namespace std;
 using namespace Eigen;
-
+// REMEMBER TO CALL zero_params between each backwards() call. 
 class Node {
     public:
         vector<Node*> inputs;
@@ -21,9 +21,12 @@ class Node {
         bool visit = false;
         bool requires_grad = true; 
         MatrixXd val;
-        virtual void backward(double upstream, bool output = false){}
+        virtual void backward(MatrixXd upstream){}
         virtual void propogate(){} //helper function to push local gradient down to inputs.
         virtual ~Node(){}
+        void init_grad_buffer(){
+            d_loss = MatrixXd::Zero(val.rows(), val.cols());
+        }
         void walk(Node* root){
             if (root->visit){return;}
             root->visit = true; 
@@ -35,7 +38,7 @@ class Node {
         }
         void reset(){
             for(Node* node : visited){
-                node->d_loss.setZero();
+                if (!node->param) node->d_loss.setZero();
                 node->visit = false;
             }
             visited.clear();
@@ -47,8 +50,9 @@ class ParamNode : public Node{
             param = true;
             val = value;
             this->requires_grad = requires_grad;
+            init_grad_buffer();
         }
-        void backward(MatrixXd upstream, bool output = false){
+        void backward(MatrixXd upstream){
             d_loss += upstream;
         }
 };
@@ -65,16 +69,16 @@ class AddNode : public Node{
             if (x.requires_grad) inputs.push_back(&x);
             if (y.requires_grad) inputs.push_back(&y);
             val = x.val + y.val;
+            init_grad_buffer();
         }
-        void backward(MatrixXd upstream, bool output = false){
-            reset();
-            double grad;
+        void backward(MatrixXd upstream){
             d_loss += upstream;
             walk(this);
             reverse(visited.begin(), visited.end());
             for (Node* node : visited){
                 node->propogate();
             }
+            reset();
         }
         void propogate(){
             if (xptr->requires_grad) xptr->d_loss += d_loss;
@@ -99,16 +103,17 @@ class MultNode : public Node{
 
             // assume x and y are matrices
             val = x.val * y.val;
+            init_grad_buffer();
         }
 
-        void backward(MatrixXd upstream, bool output = false){
-            reset();
+        void backward(MatrixXd upstream){
             d_loss += upstream;
             walk(this);
             reverse(visited.begin(), visited.end());
             for (Node* node : visited){
                 node->propogate();
             }
+            reset();
         }
         void propogate(){
             /*for (int i = 0; i<inputs.size();i++){
@@ -121,8 +126,8 @@ class MultNode : public Node{
                 inputs[i]->d_loss += d_loss*grad;
             }*/
            // Assume y is the column vector
-           if (xptr->requires_grad) yptr->d_loss += xptr->val.transpose() * d_loss;
-           if (yptr->requires_grad) xptr->d_loss += d_loss * yptr->val.transpose();
+           if (xptr->requires_grad) xptr->d_loss += d_loss * yptr->val.transpose();
+           if (yptr->requires_grad) yptr->d_loss += xptr->val.transpose() * d_loss;
         }
 };
 
@@ -134,18 +139,19 @@ class LogNode : public Node {
             xptr = &x;
             if (x.requires_grad) inputs.push_back(&x);
             val = x.val.array().log().matrix();
+            init_grad_buffer();
         }
-        void backward(MatrixXd upstream, bool output = false){
-            reset();
+        void backward(MatrixXd upstream){
             d_loss+=upstream;
             walk(this);
             reverse(visited.begin(), visited.end());
             for(Node* node : visited){
                 node->propogate();
             }
+            reset();
         }
         void propogate(){
-            if (xptr->requires_grad) xptr->d_loss += d_loss.cwiseProduct(xptr->val.unaryExpr(&derivative));
+            if (xptr->requires_grad) xptr->d_loss += d_loss.cwiseProduct(xptr->val.unaryExpr(&LogNode::derivative));
         }
         static double derivative(double val){
             return 1/val;
@@ -156,27 +162,28 @@ class SigmoidNode : public Node {
     private:
         Node* xptr;
     public:
-        double sigmoid_fcn(double value){
+        static double sigmoid_fcn(double value){
             return 1/(1+exp(0-value));
         }
         SigmoidNode(Node& x){
             xptr = &x;
             if (x.requires_grad) inputs.push_back(&x);
-            val = x.val.unaryExpr(&sigmoid_fcn);
+            val = x.val.unaryExpr(&SigmoidNode::sigmoid_fcn);
+            init_grad_buffer();
         }
-        void backward(MatrixXd upstream, bool output = false){
-            reset();
+        void backward(MatrixXd upstream){
             d_loss += upstream;
             walk(this);
             reverse(visited.begin(), visited.end());
             for (Node* node : visited){
                 node->propogate();
             }
+            reset();
         }
         void propogate(){
-            if (xptr->requires_grad) xptr->d_loss += d_loss.cwiseProduct(xptr->val.unaryExpr(&derivative));
+            if (xptr->requires_grad) xptr->d_loss += d_loss.cwiseProduct(xptr->val.unaryExpr(&SigmoidNode::derivative));
         }
-        double derivative(double value){
+        static double derivative(double value){
             return value*(1-value);
         }
 };
@@ -185,27 +192,28 @@ class ReLUNode : public Node {
     private:
         Node* xptr;
     public:
-        double relu(double value){
+        static double relu(double value){
             return (value>0) ? value : 0;
         }
         ReLUNode(Node& x){
             xptr = &x;
             if (x.requires_grad) inputs.push_back(&x);
-            val = xptr->val.unaryExpr(&relu);
+            val = xptr->val.unaryExpr(&ReLUNode::relu);
+            init_grad_buffer();
         }
-        void backward(MatrixXd upstream, bool output = false){
-            reset();
+        void backward(MatrixXd upstream){
             d_loss += upstream;
             walk(this);
             reverse(visited.begin(), visited.end());
             for (Node* node : visited){
                 node->propogate();
             }
+            reset();
         }
         void propogate(){
-            if(xptr->requires_grad) xptr->d_loss += d_loss.cwiseProduct(xptr->val.unaryExpr(&derivative));
+            if(xptr->requires_grad) xptr->d_loss += d_loss.cwiseProduct(xptr->val.unaryExpr(&ReLUNode::derivative));
         }
-        double derivative(double value){
+        static double derivative(double value){
             return (value <= 0) ? 0 : 1;
         }
 };
@@ -218,20 +226,21 @@ class tanhNode : public Node {
             xptr = &x;
             if (x.requires_grad) inputs.push_back(&x);
             val = x.val.array().tanh().matrix();
+            init_grad_buffer();
         }
-        void backward(MatrixXd upstream, bool output = false){
-            reset();
+        void backward(MatrixXd upstream){
             d_loss+=upstream;
             walk(this);
             reverse(visited.begin(), visited.end());
             for(Node* node : visited){
                 node->propogate();
             }
+            reset();
         }
         void propogate(){
-            if (xptr->requires_grad) xptr->d_loss += d_loss.cwiseProduct(xptr->val.unaryExpr(&derivative));
+            if (xptr->requires_grad) xptr->d_loss += d_loss.cwiseProduct(xptr->val.unaryExpr(&tanhNode::derivative));
         }
-        double derivative(double value){
+        static double derivative(double value){
             return 1-value*value;
         }
 };
@@ -248,11 +257,16 @@ Node& operator+(Node& x, Node& y){
     global.push_back(x2);
     return *x2;
 }
-
+void zero_params(){
+    for (Node* node : global){
+        if (node->param) node->d_loss.setZero();
+    }
+}
 void destroy(){
     for (Node* node : global){
         delete node;
     }
     global.clear();
 }
+
 #endif
