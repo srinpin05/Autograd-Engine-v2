@@ -10,6 +10,7 @@
 using namespace std;
 using namespace Eigen;
 // REMEMBER TO CALL zero_params between each backwards() call. 
+// ONLY WORKS FOR SINGLE THREADED PROGRAMS.
 class Node {
     public:
         vector<Node*> inputs;
