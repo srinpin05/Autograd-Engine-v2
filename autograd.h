@@ -9,12 +9,15 @@
 
 using namespace std;
 using namespace Eigen;
+
 // REMEMBER TO CALL zero_params between each backwards() call. 
 // ONLY WORKS FOR SINGLE THREADED PROGRAMS.
+
 class Node {
     public:
         vector<Node*> inputs;
         vector<Node*> visited;
+        bool heap_owned = false;
         bool param = false;
         MatrixXd d_loss;
         int forward_count = 0;
@@ -57,10 +60,11 @@ class Node {
 vector<Node*> global;
 class ParamNode : public Node{
     public: 
-        ParamNode(MatrixXd value, bool requires_grad = true){
+        ParamNode(MatrixXd value, bool requires_grad = true, bool heap_owned = false){
             param = true;
             val = value;
             this->requires_grad = requires_grad;
+            this->heap_owned = heap_owned;
             init_grad_buffer();
             global.push_back(this);
         }
@@ -100,26 +104,11 @@ class MultNode : public Node{
             yptr = &y;
             if (x.requires_grad) inputs.push_back(&x);
             if (y.requires_grad) inputs.push_back(&y);
-            /*val = 1;
-            for (int i = 0; i<inputs.size();i++){
-                val *= inputs[i]->val;
-            }*/
-
-            // assume x and y are matrices
             val = x.val * y.val;
             init_grad_buffer();
             global.push_back(this);
         }
         void propogate(){
-            /*for (int i = 0; i<inputs.size();i++){
-                grad = 1;
-                for (int j = 0; j<inputs.size();j++){
-                    if (i!=j){
-                        grad *= inputs[j]->val;
-                    }
-                }
-                inputs[i]->d_loss += d_loss*grad;
-            }*/
            // Assume y is the column vector
            if (xptr->requires_grad) xptr->d_loss += d_loss * yptr->val.transpose();
            if (yptr->requires_grad) yptr->d_loss += xptr->val.transpose() * d_loss;
@@ -136,15 +125,6 @@ class LogNode : public Node {
             val = x.val.array().log().matrix();
             init_grad_buffer();
             global.push_back(this);
-        }
-        void backward(MatrixXd upstream){
-            d_loss+=upstream;
-            walk(this);
-            reverse(visited.begin(), visited.end());
-            for(Node* node : visited){
-                node->propogate();
-            }
-            reset();
         }
         void propogate(){
             if (xptr->requires_grad) xptr->d_loss += d_loss.cwiseProduct(xptr->val.unaryExpr(&LogNode::derivative));
@@ -244,12 +224,14 @@ class MSENode : public Node {
 };
 
 inline Node& operator*(Node& x, Node& y){
-    Node* x3 = new MultNode(x, y);
-    return *x3;
+    Node* mult = new MultNode(x, y);
+    mult->heap_owned = true;
+    return *mult;
 }
 inline Node& operator+(Node& x, Node& y){
-    Node* x2 = new AddNode(x, y);
-    return *x2;
+    Node* add = new AddNode(x, y);
+    add->heap_owned = true;
+    return *add;
 }
 inline void zero_params(){
     for (Node* node : global){
@@ -261,9 +243,14 @@ inline void print_gradient_params(){
         if (node->param) cout<<node->d_loss<<endl;
     }
 }
+inline void update_gradient_params(double learning_rate){
+    for (Node* node : global){
+        if (node->param) node->val -= learning_rate*node->d_loss;
+    }
+}
 inline void destroy(){
     for (Node* node : global){
-        delete node;
+        if (node->heap_owned) delete node;
     }
     global.clear();
 }

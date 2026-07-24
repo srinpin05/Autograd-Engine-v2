@@ -9,20 +9,17 @@
 using namespace std;
 using namespace Eigen;
 
-//TODO 1: CREATE LOSS FUNCTION NODES IN autograd.h
-//TODO 2: CREATE SOFTMAX IN autograd.h
-//TODO 3: CREATE LOSS FUNCTION IN network.h
-//TODO 4: CHECK IF VectorXd and MatrixXd are compatible.
+//TODO: Finish Epochs Implementatoin
+//TODO: Finish Batches Implementation
 
 class Layer {
     public:
         bool input_layer = false;
         bool output_layer = false;
-        int activation_size;
         Node& weights;
         Node& bias;
         Node* activations = nullptr;  // initialized to nullptr; set during forward()
-
+        int activation_size;
         Layer(int input_size, int output_size, const MatrixXd& input)
             : input_layer(true)
             , weights(*(new ParamNode(MatrixXd::Random(output_size, input_size))))
@@ -73,7 +70,7 @@ class Model {
         // Seed shape must match predicted_activations shape (a column vector)
         MatrixXd seed = MatrixXd::Ones(1,1);
         loss(*predicted_activations, truevalues->activations).backward(seed);
-        print_gradient_params();
+        update_gradient_params(0.01);
     }
 
     Node& loss(Node& output, Node& predicted){
