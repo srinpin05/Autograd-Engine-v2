@@ -6,6 +6,7 @@
 #include <vector>
 #include <algorithm>
 #include <Eigen/Dense>
+#include <unsupported/Eigen/CXX11/Tensor>
 
 using namespace std;
 using namespace Eigen;
@@ -19,12 +20,12 @@ class Node {
         vector<Node*> visited;
         bool heap_owned = false;
         bool param = false;
-        MatrixXd d_loss;
+        Tensor<double, 3> d_loss;
         int forward_count = 0;
         int backward_count = 0;
         bool visit = false;
         bool requires_grad = true; 
-        MatrixXd val;
+        Tensor<double, 3> val;
         virtual void backward(MatrixXd upstream){
             d_loss += upstream;
             walk(this);
@@ -37,7 +38,8 @@ class Node {
         virtual void propogate(){} //helper function to push local gradient down to inputs.
         virtual ~Node(){}
         void init_grad_buffer(){
-            d_loss = MatrixXd::Zero(val.rows(), val.cols());
+            d_loss.resize(val.dimensions());
+            d_loss.setZero();
         }
         void walk(Node* root){
             if (root->visit){return;}
@@ -60,7 +62,8 @@ class Node {
 vector<Node*> global;
 class ParamNode : public Node{
     public: 
-        ParamNode(MatrixXd value, bool requires_grad = true, bool heap_owned = false){
+        Tensor<double, 2> val;
+        ParamNode(Tensor<double, 2> value, bool requires_grad = true, bool heap_owned = false){
             param = true;
             val = value;
             this->requires_grad = requires_grad;
@@ -72,6 +75,21 @@ class ParamNode : public Node{
             d_loss += upstream;
         }
 };
+
+class InputNode : public Node{
+    public: 
+        InputNode(Tensor<double, 3> value, bool requires_grad = true, bool heap_owned = false){
+            val = value;
+            this->requires_grad = requires_grad;
+            this->heap_owned = heap_owned;
+            init_grad_buffer();
+            global.push_back(this);
+        }
+        void backward(MatrixXd upstream){
+            d_loss += upstream;
+        }
+};
+
 
 
 class AddNode : public Node{
@@ -104,14 +122,35 @@ class MultNode : public Node{
             yptr = &y;
             if (x.requires_grad) inputs.push_back(&x);
             if (y.requires_grad) inputs.push_back(&y);
-            val = x.val * y.val;
+            Eigen::array<Eigen::IndexPair<int>,1> product_dims = {
+                Eigen::IndexPair<int>(1,1)
+            };
+            //val = x.val * y.val;
+            val = y.val.contract(x.val, product_dims).shuffle(Eigen::array<int, 3>{0,2,1});
             init_grad_buffer();
             global.push_back(this);
         }
         void propogate(){
            // Assume y is the column vector
-           if (xptr->requires_grad) xptr->d_loss += d_loss * yptr->val.transpose();
-           if (yptr->requires_grad) yptr->d_loss += xptr->val.transpose() * d_loss;
+            Eigen::array<Eigen::IndexPair<int>,2> x_dims = {
+                Eigen::IndexPair<int>(0,0), Eigen::IndexPair<int>(2,2)
+            };
+
+           //if (xptr->requires_grad) xptr->d_loss += d_loss * yptr->val.transpose();
+           if (xptr->requires_grad) {
+                Tensor<double, 2> grad_x = d_loss.contract(yptr->val, x_dims);
+                xptr->d_loss += grad_x * (1.0 / 32);
+
+           }
+           //if (yptr->requires_grad) yptr->d_loss += xptr->val.transpose() * d_loss;
+           Eigen::array<Eigen::IndexPair<int>, 1> y_dims = {
+                IndexPair<int>(1,0)
+           };
+           if (yptr->requires_grad){
+                Tensor<double, 3> grad_y = d_loss.contract(xptr->val, y_dims);
+                yptr->d_loss += grad_y.shuffle(Eigen::array<int,3>{0,2,1});
+           }
+
         }
 };
 

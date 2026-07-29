@@ -62,7 +62,7 @@ class Model {
         predicted_activations = &(l.back()->weights * (*l.back()->activations) + l.back()->bias);
     }
 
-    void backward_propogate(){
+    void backward_propogate(double learning_rate){
         if (!truevalues) {
             cerr << "Model: truevalues not set. Call set_truevalues() first.\n";
             return;
@@ -70,8 +70,9 @@ class Model {
         // Seed shape must match predicted_activations shape (a column vector)
         MatrixXd seed = MatrixXd::Ones(1,1);
         loss(*predicted_activations, truevalues->activations).backward(seed);
-        update_gradient_params(0.01);
+        update_gradient_params(learning_rate);
     }
+    void train(int epochs){}
 
     Node& loss(Node& output, Node& predicted){
         Node* loss_node = new MSENode(output, predicted);
