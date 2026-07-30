@@ -13,11 +13,26 @@ using namespace Eigen;
 
 // REMEMBER TO CALL zero_params between each backwards() call. 
 // ONLY WORKS FOR SINGLE THREADED PROGRAMS.
+/* 
+Three different approaches considered for Batched autograd
+ 1. Loop over batches and epochs seperately in network.h and leave autograd.h 
+    (slow but easy)
 
+ 2. Assume all tensors that are passed into autograd.h are 3 dimensional (for batches)
+    and treat the 0th dimension as iteration count
+    and operate on the other 2 dimensions as 2d matrices 
+    (mid but nice generalization)
+
+ 3. Write specific code for each Node with specific assumptions 
+    about the 2d matrices (parameters) and the 3d matrices (batched data) 
+    
+    (faster but no generalization)
+*/
 class Node {
     public:
         vector<Node*> inputs;
         vector<Node*> visited;
+        bool input = false;
         bool heap_owned = false;
         bool param = false;
         Tensor<double, 3> d_loss;
@@ -26,7 +41,7 @@ class Node {
         bool visit = false;
         bool requires_grad = true; 
         Tensor<double, 3> val;
-        virtual void backward(MatrixXd upstream){
+        virtual void backward(Tensor<double,3> upstream){
             d_loss += upstream;
             walk(this);
             reverse(visited.begin(), visited.end());
@@ -62,30 +77,30 @@ class Node {
 vector<Node*> global;
 class ParamNode : public Node{
     public: 
-        Tensor<double, 2> val;
-        ParamNode(Tensor<double, 2> value, bool requires_grad = true, bool heap_owned = false){
+        ParamNode(Tensor<double, 3> value, bool requires_grad = true){
             param = true;
             val = value;
             this->requires_grad = requires_grad;
-            this->heap_owned = heap_owned;
+            this->heap_owned = true;
             init_grad_buffer();
             global.push_back(this);
         }
-        void backward(MatrixXd upstream){
+        void backward(Tensor<double,3> upstream){
             d_loss += upstream;
         }
 };
 
 class InputNode : public Node{
     public: 
-        InputNode(Tensor<double, 3> value, bool requires_grad = true, bool heap_owned = false){
+        InputNode(Tensor<double, 3> value, bool requires_grad = true){
+            input = true;
             val = value;
             this->requires_grad = requires_grad;
-            this->heap_owned = heap_owned;
+            this->heap_owned = true;
             init_grad_buffer();
             global.push_back(this);
         }
-        void backward(MatrixXd upstream){
+        void backward(Tensor<double,3> upstream){
             d_loss += upstream;
         }
 };
@@ -102,13 +117,49 @@ class AddNode : public Node{
             yptr = &y;
             if (x.requires_grad) inputs.push_back(&x);
             if (y.requires_grad) inputs.push_back(&y);
-            val = x.val + y.val;
+
+            if (x.val.dimension(0) == y.val.dimension(0)) {
+                // batch dims already match (or both are size 1) — no loop needed
+                val = x.val + y.val;
+            } else {
+                // batch dims differ (one side is a broadcastable size-1 operand) — loop over batch
+                int batch = std::max(x.val.dimension(0), y.val.dimension(0));
+                val = Tensor<double,3>(batch, x.val.dimension(1), x.val.dimension(2));
+                for (int b = 0; b < batch; b++){
+                    int xb = (x.val.dimension(0) == 1) ? 0 : b;
+                    int yb = (y.val.dimension(0) == 1) ? 0 : b;
+                    Tensor<double,2> x_slice = x.val.chip(xb, 0);
+                    Tensor<double,2> y_slice = y.val.chip(yb, 0);
+                    val.chip(b, 0) = x_slice + y_slice;
+                }
+            }
             init_grad_buffer();
             global.push_back(this);
         }
         void propogate(){
-            if (xptr->requires_grad) xptr->d_loss += d_loss;
-            if (yptr->requires_grad) yptr->d_loss += d_loss;
+            int batch = d_loss.dimension(0);
+
+            if (xptr->requires_grad) {
+                if (xptr->val.dimension(0) == batch) {
+                    xptr->d_loss += d_loss;
+                } else {
+                    // xptr was broadcast (batch=1) — sum contributions over batch
+                    for (int b = 0; b < batch; b++){
+                        Tensor<double,2> d_loss_slice = d_loss.chip(b, 0);
+                        xptr->d_loss.chip(0, 0) += d_loss_slice;
+                    }
+                }
+            }
+            if (yptr->requires_grad) {
+                if (yptr->val.dimension(0) == batch) {
+                    yptr->d_loss += d_loss;
+                } else {
+                    for (int b = 0; b < batch; b++){
+                        Tensor<double,2> d_loss_slice = d_loss.chip(b, 0);
+                        yptr->d_loss.chip(0, 0) += d_loss_slice;
+                    }
+                }
+            }
         }
 };
 
@@ -122,35 +173,54 @@ class MultNode : public Node{
             yptr = &y;
             if (x.requires_grad) inputs.push_back(&x);
             if (y.requires_grad) inputs.push_back(&y);
-            Eigen::array<Eigen::IndexPair<int>,1> product_dims = {
-                Eigen::IndexPair<int>(1,1)
+
+            int batch = std::max(x.val.dimension(0), y.val.dimension(0));
+            int out_rows = x.val.dimension(1);
+            int out_cols = y.val.dimension(2);
+
+            val = Tensor<double,3>(batch, out_rows, out_cols);
+
+            Eigen::array<Eigen::IndexPair<int>,1> product_dims_2d = {
+                Eigen::IndexPair<int>(1,0) // x_slice's cols against y_slice's rows
             };
-            //val = x.val * y.val;
-            val = y.val.contract(x.val, product_dims).shuffle(Eigen::array<int, 3>{0,2,1});
+
+            for (int b = 0; b < batch; b++){
+                int xb = (x.val.dimension(0) == 1) ? 0 : b;
+                int yb = (y.val.dimension(0) == 1) ? 0 : b;
+                Tensor<double,2> x_slice = x.val.chip(xb, 0);
+                Tensor<double,2> y_slice = y.val.chip(yb, 0);
+                val.chip(b, 0) = x_slice.contract(y_slice, product_dims_2d);
+            }
+
             init_grad_buffer();
             global.push_back(this);
         }
+
         void propogate(){
-           // Assume y is the column vector
-            Eigen::array<Eigen::IndexPair<int>,2> x_dims = {
-                Eigen::IndexPair<int>(0,0), Eigen::IndexPair<int>(2,2)
-            };
+            int batch = d_loss.dimension(0);
 
-           //if (xptr->requires_grad) xptr->d_loss += d_loss * yptr->val.transpose();
-           if (xptr->requires_grad) {
-                Tensor<double, 2> grad_x = d_loss.contract(yptr->val, x_dims);
-                xptr->d_loss += grad_x * (1.0 / 32);
+            Eigen::array<Eigen::IndexPair<int>,1> dx_dims = { Eigen::IndexPair<int>(1,1) };
+            Eigen::array<Eigen::IndexPair<int>,1> dy_dims = { Eigen::IndexPair<int>(0,0) };
 
-           }
-           //if (yptr->requires_grad) yptr->d_loss += xptr->val.transpose() * d_loss;
-           Eigen::array<Eigen::IndexPair<int>, 1> y_dims = {
-                IndexPair<int>(1,0)
-           };
-           if (yptr->requires_grad){
-                Tensor<double, 3> grad_y = d_loss.contract(xptr->val, y_dims);
-                yptr->d_loss += grad_y.shuffle(Eigen::array<int,3>{0,2,1});
-           }
+            for (int b = 0; b < batch; b++){
+                Tensor<double,2> d_loss_slice = d_loss.chip(b, 0);
 
+                if (xptr->requires_grad) {
+                    int yb = (yptr->val.dimension(0) == 1) ? 0 : b;
+                    Tensor<double,2> y_slice = yptr->val.chip(yb, 0);
+                    Tensor<double,2> grad_x_slice = d_loss_slice.contract(y_slice, dx_dims);
+                    int xb = (xptr->val.dimension(0) == 1) ? 0 : b;
+                    xptr->d_loss.chip(xb, 0) += grad_x_slice;
+                }
+
+                if (yptr->requires_grad) {
+                    int xb = (xptr->val.dimension(0) == 1) ? 0 : b;
+                    Tensor<double,2> x_slice = xptr->val.chip(xb, 0);
+                    Tensor<double,2> grad_y_slice = x_slice.contract(d_loss_slice, dy_dims);
+                    int yb = (yptr->val.dimension(0) == 1) ? 0 : b;
+                    yptr->d_loss.chip(yb, 0) += grad_y_slice;
+                }
+            }
         }
 };
 
@@ -161,12 +231,12 @@ class LogNode : public Node {
         LogNode(Node& x) {
             xptr = &x;
             if (x.requires_grad) inputs.push_back(&x);
-            val = x.val.array().log().matrix();
+            val = x.val.log(); // elementwise across all 3 axes at once — no loop needed
             init_grad_buffer();
             global.push_back(this);
         }
         void propogate(){
-            if (xptr->requires_grad) xptr->d_loss += d_loss.cwiseProduct(xptr->val.unaryExpr(&LogNode::derivative));
+            if (xptr->requires_grad) xptr->d_loss += d_loss * xptr->val.unaryExpr(&LogNode::derivative);
         }
         static double derivative(double val){
             return 1/val;
@@ -183,12 +253,12 @@ class SigmoidNode : public Node {
         SigmoidNode(Node& x){
             xptr = &x;
             if (x.requires_grad) inputs.push_back(&x);
-            val = x.val.unaryExpr(&SigmoidNode::sigmoid_fcn);
+            val = x.val.unaryExpr(&SigmoidNode::sigmoid_fcn); // elementwise — no loop needed
             init_grad_buffer();
             global.push_back(this);
         }
         void propogate(){
-            if (xptr->requires_grad) xptr->d_loss += d_loss.cwiseProduct(xptr->val.unaryExpr(&SigmoidNode::derivative));
+            if (xptr->requires_grad) xptr->d_loss += d_loss * xptr->val.unaryExpr(&SigmoidNode::derivative);
         }
         static double derivative(double value){
             return value*(1-value);
@@ -205,12 +275,12 @@ class ReLUNode : public Node {
         ReLUNode(Node& x){
             xptr = &x;
             if (x.requires_grad) inputs.push_back(&x);
-            val = xptr->val.unaryExpr(&ReLUNode::relu);
+            val = xptr->val.unaryExpr(&ReLUNode::relu); // elementwise — no loop needed
             init_grad_buffer();
             global.push_back(this);
         }
         void propogate(){
-            if(xptr->requires_grad) xptr->d_loss += d_loss.cwiseProduct(xptr->val.unaryExpr(&ReLUNode::derivative));
+            if(xptr->requires_grad) xptr->d_loss += d_loss * xptr->val.unaryExpr(&ReLUNode::derivative);
         }
         static double derivative(double value){
             return (value <= 0) ? 0 : 1;
@@ -224,12 +294,12 @@ class tanhNode : public Node {
         tanhNode(Node& x){
             xptr = &x;
             if (x.requires_grad) inputs.push_back(&x);
-            val = x.val.array().tanh().matrix();
+            val = x.val.tanh(); // elementwise — no loop needed
             init_grad_buffer();
             global.push_back(this);
         }
         void propogate(){
-            if (xptr->requires_grad) xptr->d_loss += d_loss.cwiseProduct(xptr->val.unaryExpr(&tanhNode::derivative));
+            if (xptr->requires_grad) xptr->d_loss += d_loss * xptr->val.unaryExpr(&tanhNode::derivative);
         }
         static double derivative(double value){
             return 1-value*value;
@@ -243,7 +313,7 @@ class MSENode : public Node {
     private:
         Node* xptr;
         Node* yptr;
-        MatrixXd error;
+        Tensor<double,3> error;
         double N;
     public: 
         //X is predicted and Y is true value
@@ -251,9 +321,11 @@ class MSENode : public Node {
             xptr = &x;
             yptr = &y;
             if (x.requires_grad) inputs.push_back(&x);
-            N = x.val.rows();
-            error = x.val - y.val;
-            val = MatrixXd::Constant(1, 1, (1/N)*((error.cwiseProduct(error)).sum()));
+            N = x.val.dimension(0); // batch size, 0th dimension
+            error = x.val - y.val;  // elementwise across all 3 axes — no loop needed
+            Eigen::Tensor<double,0> sum_sq = (error * error).sum();
+            val = Tensor<double,3>(1,1,1);
+            val(0,0,0) = (1.0/N) * sum_sq(0);
             init_grad_buffer();
             global.push_back(this);
         }
@@ -261,6 +333,7 @@ class MSENode : public Node {
             if (xptr->requires_grad) xptr->d_loss += (2*error)/N;
         }
 };
+
 
 inline Node& operator*(Node& x, Node& y){
     Node* mult = new MultNode(x, y);
@@ -292,6 +365,15 @@ inline void destroy(){
         if (node->heap_owned) delete node;
     }
     global.clear();
+}
+inline void destroy_mid(){
+    vector<Node*> keep;
+    keep.reserve(global.size());
+    for (Node* node : global){
+        if (node->param || node->input) keep.push_back(node);
+        else delete node;
+    }
+    global = std::move(keep);
 }
 
 #endif

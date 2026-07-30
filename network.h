@@ -12,6 +12,21 @@ using namespace Eigen;
 //TODO: Finish Epochs Implementatoin
 //TODO: Finish Batches Implementation
 
+// Helper: random weight tensor, shape (1, output_size, input_size) — batch=1 since
+// weights are shared across the batch (MultNode/AddNode broadcast batch=1 automatically).
+inline Tensor<double,3> random_weights(int output_size, int input_size){
+    Tensor<double,3> w(1, output_size, input_size);
+    w.setRandom();
+    return w;
+}
+
+// Helper: random bias tensor, shape (1, output_size, 1)
+inline Tensor<double,3> random_bias(int output_size){
+    Tensor<double,3> b(1, output_size, 1);
+    b.setRandom();
+    return b;
+}
+
 class Layer {
     public:
         bool input_layer = false;
@@ -20,20 +35,23 @@ class Layer {
         Node& bias;
         Node* activations = nullptr;  // initialized to nullptr; set during forward()
         int activation_size;
-        Layer(int input_size, int output_size, const MatrixXd& input)
+
+        // input: Tensor<double,3> shaped (batch, input_size, 1)
+        Layer(int input_size, int output_size, const Tensor<double,3>& input)
             : input_layer(true)
-            , weights(*(new ParamNode(MatrixXd::Random(output_size, input_size))))
-            , bias(*(new ParamNode(VectorXd::Random(output_size))))
-            , activations(new ParamNode(input))
+            , weights(*(new ParamNode(random_weights(output_size, input_size))))
+            , bias(*(new ParamNode(random_bias(output_size))))
+            , activations(new InputNode(input, false))
             , activation_size(input_size)
         {}
 
         Layer(int input_size, int output_size)
-            : weights(*(new ParamNode(MatrixXd::Random(output_size, input_size))))
-            , bias(*(new ParamNode(VectorXd::Random(output_size))))
+            : weights(*(new ParamNode(random_weights(output_size, input_size))))
+            , bias(*(new ParamNode(random_bias(output_size))))
             , activations(nullptr)  // set during forward()
             , activation_size(input_size)
         {}
+
 };
 
 class OutputLayer {
@@ -42,10 +60,12 @@ class OutputLayer {
         Node& activations;
         int activation_size;
 
-        OutputLayer(int output_size, const VectorXd& ground_truth)
-            : activations(*(new ParamNode(ground_truth)))
+        // ground_truth: Tensor<double,3> shaped (batch, output_size, 1)
+        OutputLayer(int output_size, const Tensor<double,3>& ground_truth)
+            : activations(*(new InputNode(ground_truth, false)))
             , activation_size(output_size)
         {}
+
 };
 
 class Model {
@@ -53,7 +73,7 @@ class Model {
     vector<Layer*> l;
     OutputLayer* truevalues = nullptr;  // set after construction
     Node* predicted_activations = nullptr;
-
+    double loss_val;
     void forward(){
         for (size_t i = 0; i + 1 < l.size(); i++){
             l[i+1]->activations = &(l[i]->weights * (*l[i]->activations) + l[i]->bias);
@@ -67,15 +87,19 @@ class Model {
             cerr << "Model: truevalues not set. Call set_truevalues() first.\n";
             return;
         }
-        // Seed shape must match predicted_activations shape (a column vector)
-        MatrixXd seed = MatrixXd::Ones(1,1);
-        loss(*predicted_activations, truevalues->activations).backward(seed);
+        // Seed shape must match predicted_activations/loss output shape: (1,1,1)
+        Tensor<double,3> seed(1,1,1);
+        seed.setConstant(1.0);
+        Node& l = loss(*predicted_activations, truevalues->activations);
+        loss_val = l.val(0,0,0);
+        l.backward(seed);
         update_gradient_params(learning_rate);
+        destroy_mid();   // free the per-epoch graph (MultNode/AddNode/MSENode)
     }
-    void train(int epochs){}
 
     Node& loss(Node& output, Node& predicted){
         Node* loss_node = new MSENode(output, predicted);
+        loss_node->heap_owned = true;
         return *loss_node;
     }
 
