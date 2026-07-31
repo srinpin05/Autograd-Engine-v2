@@ -1,71 +1,85 @@
-#include "network.h"
 #include <iostream>
+#include "dataloader.h"     // the file you just wrote (loadData8bit, LoadData, etc.)
+#include "network.h"   // Layer, OutputLayer, Model
+
+using namespace std;
 
 int main(){
-    // Simple linear regression test: y = 2*x1 - 3*x2 + 1
-    // (Model has no activation nonlinearity between layers, so keep the target linear)
-    int batch = 4;
-    Tensor<double,3> X(batch, 2, 1);
-    Tensor<double,3> Y(batch, 3, 1);   // 3 classes (not 1) — one-hot per sample
+    // ---- Load training data ----
+    Tensor<double,1> train_x;
+    Tensor<double,2> train_y;
+    LoadData(train_x, train_y,
+              "data/train-images.idx3-ubyte",
+              "data/train-labels.idx1-ubyte",
+              10);
 
-    /*
-    double x1[4] = {1, 2, 3, 4};
-    double x2[4] = {0.5, 1, 1.5, 2};
-    for (int b = 0; b < batch; b++){
-        X(b,0,0) = x1[b];
-        X(b,1,0) = x2[b];
-        Y(b,0,0) = 2*x1[b] - 3*x2[b] + 1;
-    }
+    // Normalize pixel values from [0,255] to [0,1] — helps training stability a lot
+    train_x = train_x / 255.0;
 
-    Model model;
-    Layer* layer1 = new Layer(2, 1, X);   // single linear layer, input_size=2, output_size=1
+    int input_size = size_of_sample;   // 784 for MNIST (28*28), set by loadData8bit
+    int num_classes = 10;
+    int batch_size = 6000;
+
+    // ---- Build model ----
+    Model model(train_x, train_y);
+
+    Layer* layer1 = new Layer(input_size, 128, train_x, batch_size); // input layer
+    Layer* layer2 = new Layer(128, 64);                              // hidden layer
+    Layer* layer3 = new Layer(64, num_classes);                      // output layer
     model.add_layer(layer1);
+    model.add_layer(layer2);
+    model.add_layer(layer3);
 
-    OutputLayer* out = new OutputLayer(1, Y);
+    OutputLayer* out = new OutputLayer(num_classes, train_y, batch_size);
     model.set_truevalues(out);
-    */
 
-    X(0,0,0)=0; X(0,1,0)=0; Y(0,0,0)=1; Y(0,1,0)=0; Y(0,2,0)=0;  // class 0
-    X(1,0,0)=0; X(1,1,0)=1; Y(1,0,0)=0; Y(1,1,0)=1; Y(1,2,0)=0;  // class 1
-    X(2,0,0)=1; X(2,1,0)=0; Y(2,0,0)=0; Y(2,1,0)=0; Y(2,2,0)=1;  // class 2
-    X(3,0,0)=1; X(3,1,0)=1; Y(3,0,0)=1; Y(3,1,0)=0; Y(3,2,0)=0;  // class 0
-
-
-    Model model;
-    Layer* l0 = new Layer(2, 4, X);   // hidden: 2 -> 4
-    Layer* l1 = new Layer(4, 3);      // output: 4 -> 3
-    model.add_layer(l0);
-    model.add_layer(l1);
-
-    OutputLayer* out = new OutputLayer(3, Y);
-    model.set_truevalues(out);
-    int epochs = 5000;
-    double lr = 0.1;
-    //Train loop
+    // ---- Train ----
+    int epochs = 5;
+    double learning_rate = 0.01;
     for (int e = 0; e < epochs; e++){
-        zero_params();          // REQUIRED: param d_loss accumulates otherwise
-        model.forward();
-
-
-        model.backward_propogate(lr);
-
-        if (e % 200 == 0){
-            cout << "Epoch " << e << " loss: " << model.loss_val << endl;
-        }
-
+        model.train(learning_rate);
+        cout << "Epoch " << e << " last-batch loss: " << model.loss_val << endl;
     }
 
-    // Test: run forward once more and print predictions vs ground truth
+    // ---- Load test data ----
+    Tensor<double,1> test_x;
+    Tensor<double,2> test_y;
+    LoadData(test_x, test_y,
+              "data/t10k-images.idx3-ubyte",
+              "data/t10k-labels.idx1-ubyte",
+              10);
+    test_x = test_x / 255.0;
+
+    // ---- Evaluate accuracy on a batch of test data ----
+    int test_batch_size = 100;
+    Tensor<double,3> x_batch, y_batch;
+    load_next_batch_i(test_x, x_batch, 0, test_batch_size, input_size);
+    load_next_batch_o(test_y, y_batch, 0, test_batch_size, num_classes);
+
+    Node* test_input = new InputNode(x_batch, false);
+    layer1->activations = test_input;
     model.forward();
-    cout << "\nFinal predictions vs targets:\n";
-    Tensor<double, 3> softmax_predictions = softmax(model.predicted_activations->val);
-    for (int b = 0; b < batch; b++){
-        cout << "  pred=" << softmax_predictions(b,0,0)
-             << "  true=" << Y(b,0,0) << endl;
+
+    int correct = 0;
+    for (int b = 0; b < test_batch_size; b++){
+        int predicted_class = 0;
+        double max_val = model.predicted_activations->val(b, 0, 0);
+        for (int c = 1; c < num_classes; c++){
+            if (model.predicted_activations->val(b, c, 0) > max_val){
+                max_val = model.predicted_activations->val(b, c, 0);
+                predicted_class = c;
+            }
+        }
+        int true_class = 0;
+        for (int c = 0; c < num_classes; c++){
+            if (y_batch(b, c, 0) == 1.0){ true_class = c; break; }
+        }
+        if (predicted_class == true_class) correct++;
     }
 
-    destroy();         // free the post-training graph nodes (MultNode/AddNode)
-    delete l0; delete l1; delete out;   
+    cout << "Test accuracy on " << test_batch_size << " samples: "
+         << (100.0 * correct / test_batch_size) << "%" << endl;
 
+    destroy();
     return 0;
 }

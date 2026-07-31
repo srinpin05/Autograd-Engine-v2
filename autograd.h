@@ -618,4 +618,8 @@ inline void destroy_mid(){
     global = std::move(keep);
 }
 
+inline void remove_from_global(Node* target){
+    global.erase(std::remove(global.begin(), global.end(), target), global.end());
+}
+
 #endif
