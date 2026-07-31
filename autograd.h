@@ -28,6 +28,20 @@ Three different approaches considered for Batched autograd
     
     (faster but no generalization)
 */
+
+
+//FORWARD DECLARATIONS
+
+inline double sigmoid_fcn(double value);
+inline double sigmoid_derivative(double value);
+inline double relu(double value);
+inline double relu_derivative(double value);
+inline double tanh_derivative(double value);
+inline void softmax(const Tensor<double, 3> &input, Tensor<double, 3> &val);
+inline Tensor<double, 3> softmax(const Tensor<double, 3> &input);
+inline Tensor<double, 3> clamp(Tensor<double, 3> input);
+//NODE CLASSES
+
 class Node {
     public:
         vector<Node*> inputs;
@@ -106,6 +120,8 @@ class InputNode : public Node{
 };
 
 
+
+//BASIC OPERATOR NODES
 
 class AddNode : public Node{
     private:
@@ -243,25 +259,23 @@ class LogNode : public Node {
         }
 };
 
+
+
+//COMMON ACTIVATION FUNCTION NODES
+
 class SigmoidNode : public Node {
     private:
         Node* xptr;
     public:
-        static double sigmoid_fcn(double value){
-            return 1/(1+exp(0-value));
-        }
         SigmoidNode(Node& x){
             xptr = &x;
             if (x.requires_grad) inputs.push_back(&x);
-            val = x.val.unaryExpr(&SigmoidNode::sigmoid_fcn); // elementwise — no loop needed
+            val = x.val.unaryExpr(&sigmoid_fcn); // elementwise — no loop needed
             init_grad_buffer();
             global.push_back(this);
         }
         void propogate(){
-            if (xptr->requires_grad) xptr->d_loss += d_loss * xptr->val.unaryExpr(&SigmoidNode::derivative);
-        }
-        static double derivative(double value){
-            return value*(1-value);
+            if (xptr->requires_grad) xptr->d_loss += d_loss * xptr->val.unaryExpr(&sigmoid_derivative);
         }
 };
 
@@ -269,21 +283,15 @@ class ReLUNode : public Node {
     private:
         Node* xptr;
     public:
-        static double relu(double value){
-            return (value>0) ? value : 0;
-        }
         ReLUNode(Node& x){
             xptr = &x;
             if (x.requires_grad) inputs.push_back(&x);
-            val = xptr->val.unaryExpr(&ReLUNode::relu); // elementwise — no loop needed
+            val = xptr->val.unaryExpr(&relu); // elementwise — no loop needed
             init_grad_buffer();
             global.push_back(this);
         }
         void propogate(){
-            if(xptr->requires_grad) xptr->d_loss += d_loss * xptr->val.unaryExpr(&ReLUNode::derivative);
-        }
-        static double derivative(double value){
-            return (value <= 0) ? 0 : 1;
+            if(xptr->requires_grad) xptr->d_loss += d_loss * xptr->val.unaryExpr(&relu_derivative);
         }
 };
 
@@ -299,15 +307,48 @@ class tanhNode : public Node {
             global.push_back(this);
         }
         void propogate(){
-            if (xptr->requires_grad) xptr->d_loss += d_loss * xptr->val.unaryExpr(&tanhNode::derivative);
-        }
-        static double derivative(double value){
-            return 1-value*value;
+            if (xptr->requires_grad) xptr->d_loss += d_loss * xptr->val.unaryExpr(&tanh_derivative);
         }
 };
 
-//LOSS FUNCTION NODES
+class SoftmaxNode : public Node {
+    private:
+        Node *xptr;
+        int batch;
+        int logits;
+    public:
+        SoftmaxNode(Node& x){
+            //Shape has to be (b, m, 1) where b is batch and m is the number of logits. 
+            xptr = &x;
+            if (x.requires_grad) inputs.push_back(&x);
+            batch = x.val.dimension(0);
+            logits = x.val.dimension(1);
+            val = Tensor<double, 3>(batch, logits, 1);
+            softmax(x.val, val);
+            init_grad_buffer();
+            global.push_back(this);
+        } 
+        void propogate(){
+            if (xptr->requires_grad) {
+                for (int b = 0; b < batch; b++){
+                    Tensor<double, 2> temp = val.chip(b,0);
+                    for (int i = 0; i < logits; i++){
+                        double Si = temp(i, 0);
+                        double sum = 0;
+                        for (int j = 0; j<logits; j++){
+                            double Sj = temp(j, 0);
+                            sum += ((i!=j) ? (0 - Si*Sj) : Si*(1-Si)) * d_loss(b, j, 0);
+                        }
+                        xptr->d_loss(b, i, 0) += sum;
+                    }
+                }
+            }
+        }
+};
 
+
+
+//LOSS FUNCTION NODES
 
 class MSENode : public Node {
     private:
@@ -321,7 +362,7 @@ class MSENode : public Node {
             xptr = &x;
             yptr = &y;
             if (x.requires_grad) inputs.push_back(&x);
-            N = x.val.dimension(0); // batch size, 0th dimension
+            N = x.val.dimension(0) * x.val.dimension(1); // batch size, 0th dimension
             error = x.val - y.val;  // elementwise across all 3 axes — no loop needed
             Eigen::Tensor<double,0> sum_sq = (error * error).sum();
             val = Tensor<double,3>(1,1,1);
@@ -330,10 +371,176 @@ class MSENode : public Node {
             global.push_back(this);
         }
         void propogate(){
-            if (xptr->requires_grad) xptr->d_loss += (2*error)/N;
+            if (xptr->requires_grad) xptr->d_loss += ((2*error)/N) * d_loss(0,0,0);
         }
 };
 
+
+class CategoricalCrossEntropyNode : public Node {
+    private:
+        Node* xptr;
+        Node* yptr;
+        double N;
+        Tensor<double, 3> L;
+        Tensor<double, 3> error;
+        Tensor<double,3> x_clamped;
+    public: 
+        //X is predicted and Y is true value
+        CategoricalCrossEntropyNode(Node& x, Node& y){
+            xptr = &x;
+            yptr = &y;
+            if (x.requires_grad) inputs.push_back(&x);
+
+            //Clamping to keep log defined
+            x_clamped = clamp(x.val);
+
+            N = x.val.dimension(0); // batch size, 0th dimension
+            error = x.val - y.val;
+
+            //Average across all batches to get scalar (no intermediate L tensor)
+            Eigen::Tensor<double,0> sum_across_batches = ((y.val * (x_clamped).log()).sum(std::array<int, 1> {1})).sum();
+            val = Tensor<double,3>(1,1,1);
+            val(0,0,0) = -(1.0/N) * sum_across_batches(0);
+
+            init_grad_buffer();
+            global.push_back(this);
+        }
+        void propogate(){
+            if (xptr->requires_grad) xptr->d_loss +=  (-(yptr->val/x_clamped))/N * d_loss(0,0,0);
+        }
+};
+
+
+class CrossEntropyNode : public Node {
+    private:
+        Node* xptr;
+        Node* yptr;
+        double N;
+        Tensor<double, 3> L;
+        Tensor<double, 3> error;
+        Tensor<double,3> x_clamped;
+    public: 
+        //X is predicted and Y is true value
+        CrossEntropyNode(Node& x, Node& y){
+            xptr = &x;
+            yptr = &y;
+            if (x.requires_grad) inputs.push_back(&x);
+
+            //Clamping to keep log defined
+            x_clamped = clamp(x.val);
+
+            N = x.val.dimension(0); // batch size, 0th dimension
+            error = x.val - y.val;
+
+            //Average across all batches to get scalar (no intermediate L tensor)
+            Eigen::Tensor<double,0> sum_across_batches = (-(y.val * (x_clamped).log()) + (-y.val + 1.0) * (-x_clamped + 1.0).log()).sum();
+            val = Tensor<double,3>(1,1,1);
+            val(0,0,0) = (1.0/N) * sum_across_batches(0);
+
+            init_grad_buffer();
+            global.push_back(this);
+        }
+        void propogate(){
+            if (xptr->requires_grad) xptr->d_loss += (((error) / ((x_clamped)*(-x_clamped + 1.0)))/N) * d_loss(0,0,0);
+        }
+};
+
+
+class SigmoidBCENode : public Node {
+    private:
+        Node* xptr;
+        Node* yptr;
+        double N;
+        Tensor<double, 3> L;
+        Tensor<double, 3> error;
+        Tensor<double,3> x_sigmoid;
+    public:
+        //X is predicted and Y is true value
+        SigmoidBCENode(Node& x, Node& y){
+            xptr = &x;
+            yptr = &y;
+            if (x.requires_grad) inputs.push_back(&x);
+
+            //Clamping to keep log defined
+            N = x.val.dimension(0);
+
+            //Clamped sigmoid
+            x_sigmoid = clamp(x.val.unaryExpr(&sigmoid_fcn));
+            error = x_sigmoid - y.val;
+
+            //Average across all batches to get scalar (no intermediate L tensor)
+            Eigen::Tensor<double,0> sum_across_batches = (-(y.val * (x_sigmoid).log() + (-y.val + 1.0) * (-x_sigmoid + 1.0).log())).sum();
+            val = Tensor<double,3>(1,1,1);
+            val(0,0,0) = (1.0/N) * sum_across_batches(0);
+
+            init_grad_buffer();
+            global.push_back(this);
+        }
+        void propogate(){
+            if (xptr->requires_grad) xptr->d_loss += (error/N) * d_loss(0,0,0);
+        }
+};
+
+
+
+class SoftmaxCCENode : public Node {
+    private:
+        Node* xptr;
+        Node* yptr;
+        double N;
+        Tensor<double, 3> L;
+        Tensor<double, 3> error;
+        Tensor<double,3> x_softmax;
+    public:
+        //X is predicted and Y is true value
+        SoftmaxCCENode(Node& x, Node& y){
+            xptr = &x;
+            yptr = &y;
+            if (x.requires_grad) inputs.push_back(&x);
+
+            //Clamping to keep log defined
+            N = x.val.dimension(0);
+
+            //Clamped softmax
+            softmax(x.val, x_softmax);
+            x_softmax = clamp(x_softmax);
+            error = x_softmax - y.val;
+
+            //Average across all batches to get scalar (no intermediate L tensor)
+            Eigen::Tensor<double,0> sum_across_batches = ((y.val * (x_softmax).log()).sum(std::array<int, 1> {1})).sum();
+            val = Tensor<double,3>(1,1,1);
+            val(0,0,0) = -(1.0/N) * sum_across_batches(0);
+
+            init_grad_buffer();
+            global.push_back(this);
+        }
+        void propogate(){
+            if (xptr->requires_grad) xptr->d_loss += (error/N) * d_loss(0,0,0);
+        }
+};
+
+
+
+//ACTIVATION FUNCTIONS AND THEIR DERIVATIVES
+
+inline double sigmoid_fcn(double value){
+    return 1/(1+exp(0-value));
+}
+inline double sigmoid_derivative(double value){
+    return value*(1-value);
+}
+inline double relu(double value){
+    return (value>0) ? value : 0;
+}
+inline double relu_derivative(double value){
+    return (value <= 0) ? 0 : 1;
+}
+inline double tanh_derivative(double value){
+    return 1-value*value;
+}
+
+
+//OPERATOR OVERLOADERS
 
 inline Node& operator*(Node& x, Node& y){
     Node* mult = new MultNode(x, y);
@@ -345,6 +552,41 @@ inline Node& operator+(Node& x, Node& y){
     add->heap_owned = true;
     return *add;
 }
+
+//HELPER FUNCTIONS
+
+inline Tensor<double, 3> clamp(Tensor<double, 3> input){
+    double eps = 1e-7;
+    return input.cwiseMax(input.constant(eps)).cwiseMin(input.constant(1.0-eps));
+            
+}
+inline void softmax(const Tensor<double, 3> &input, Tensor<double, 3> &val){
+    double batch = input.dimension(0);
+    double logits = input.dimension(1);
+    val = Tensor<double, 3>(batch, logits, 1);
+
+    for (int i = 0; i < batch; i++) {
+        Eigen::Tensor<double, 2> row = input.chip(i, 0);
+        Eigen::Tensor<double, 1> row_max = row.maximum(std::array<int, 1>{0});
+        Eigen::Tensor<double, 1> row_sum = (row - row_max(0)).exp().sum(std::array<int, 1>{0});
+        val.chip(i, 0) = (row - row_max(0)).exp() / row_sum(0);
+    }
+}
+
+inline Tensor<double, 3> softmax(const Tensor<double, 3> &input){
+    double batch = input.dimension(0);
+    double logits = input.dimension(1);
+    Tensor<double, 3> val(batch, logits, 1);
+
+    for (int i = 0; i < batch; i++) {
+        Eigen::Tensor<double, 2> row = input.chip(i, 0);
+        Eigen::Tensor<double, 1> row_max = row.maximum(std::array<int, 1>{0});
+        Eigen::Tensor<double, 1> row_sum = (row - row_max(0)).exp().sum(std::array<int, 1>{0});
+        val.chip(i, 0) = (row - row_max(0)).exp() / row_sum(0);
+    }
+    return val;
+}
+
 inline void zero_params(){
     for (Node* node : global){
         if (node->param) node->d_loss.setZero();

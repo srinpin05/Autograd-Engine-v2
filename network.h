@@ -76,7 +76,8 @@ class Model {
     double loss_val;
     void forward(){
         for (size_t i = 0; i + 1 < l.size(); i++){
-            l[i+1]->activations = &(l[i]->weights * (*l[i]->activations) + l[i]->bias);
+            l[i+1]->activations = new ReLUNode(l[i]->weights * (*l[i]->activations) + l[i]->bias);
+            l[i+1]->activations->heap_owned = true;
         }
         // Final layer's activations
         predicted_activations = &(l.back()->weights * (*l.back()->activations) + l.back()->bias);
@@ -97,8 +98,8 @@ class Model {
         destroy_mid();   // free the per-epoch graph (MultNode/AddNode/MSENode)
     }
 
-    Node& loss(Node& output, Node& predicted){
-        Node* loss_node = new MSENode(output, predicted);
+    Node& loss(Node& predicted, Node& output){
+        Node* loss_node = new SoftmaxCCENode(predicted, output);
         loss_node->heap_owned = true;
         return *loss_node;
     }
