@@ -10,7 +10,7 @@
 
 **One-line description:** C++ implementation of an autograd engine to understand backpropagation.
 
-
+## DISCLAIMER: predict_sample.cpp and test_model.cpp were written by GPT 5.6 Terra High. 
 
 ## 2. Notes
 **1. Batched Autograd**
@@ -47,3 +47,6 @@ Three different approaches considered for Batched autograd
 - Solution: 
   
   Instead, we could build the graph once and rewrite the values in it for each pass pair
+
+
+

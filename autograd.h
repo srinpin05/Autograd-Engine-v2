@@ -38,8 +38,62 @@ inline double relu(double value);
 inline double relu_derivative(double value);
 inline double tanh_derivative(double value);
 inline void softmax(const Tensor<double, 3> &input, Tensor<double, 3> &val);
+inline void destroy(); //Free up non param/input nodes.
 inline Tensor<double, 3> softmax(const Tensor<double, 3> &input);
 inline Tensor<double, 3> clamp(Tensor<double, 3> input);
+
+class Node;
+
+//TAPE CLASS
+
+class Tape {
+    public:
+        vector<Node*> tape; 
+        Tape(){}
+        void add(Node* a){
+            tape.push_back(a);
+        }
+        Node* pop(Node* a){
+            Node* last_element = tape.back();
+            tape.pop_back(); 
+            return last_element;
+        }
+        ~Tape(){
+            for (Node* n : tape){
+                delete n; 
+            }
+            tape.clear();
+        }
+        void reset(){
+            for (Node* n : tape){
+                delete n; 
+            }
+            tape.clear();
+        }
+        
+};
+
+extern Tape global_tape;
+
+// autograd.h — add near the top, after Tape/global_tape declarations
+
+class Arena {
+public:
+    vector<char> buffer;
+    size_t offset = 0;
+    size_t capacity;
+    Arena(size_t bytes) : buffer(bytes), capacity(bytes){}
+    void* alloc(size_t size) {
+        void* ptr = buffer.data() + offset;
+        offset += size;
+        return ptr;
+    }
+    void reset() { offset = 0; }
+};
+
+extern Arena param_arena;      // never reset — holds ParamNode/InputNode
+extern Arena transient_arena;  // reset every batch — holds AddNode/MultNode/etc.
+
 //NODE CLASSES
 
 class Node {
@@ -57,12 +111,10 @@ class Node {
         Tensor<double, 3> val;
         virtual void backward(Tensor<double,3> upstream){
             d_loss += upstream;
-            walk(this);
-            reverse(visited.begin(), visited.end());
-            for (Node* node : visited){
-                node->propogate();
+            for (int i = global_tape.tape.size()-1; i>=0; i--){
+                global_tape.tape[i]->propogate();
             }
-            reset();
+            destroy();
         }
         virtual void propogate(){} //helper function to push local gradient down to inputs.
         virtual ~Node(){}
@@ -70,53 +122,44 @@ class Node {
             d_loss.resize(val.dimensions());
             d_loss.setZero();
         }
-        void walk(Node* root){
-            if (root->visit){return;}
-            root->visit = true; 
-            for (Node* i : root->inputs){
-                walk(i);
-            }
-            visited.push_back(root);
-    
-        }
         void reset(){
-            for(Node* node : visited){
+            for(Node* node : global_tape.tape){
                 if (!node->param) node->d_loss.setZero();
-                node->visit = false;
             }
-            visited.clear();
+            global_tape.tape.clear();
         }
 };
 
-vector<Node*> global;
 class ParamNode : public Node{
     public: 
         ParamNode(Tensor<double, 3> value, bool requires_grad = true){
             param = true;
             val = value;
             this->requires_grad = requires_grad;
-            this->heap_owned = true;
+
             init_grad_buffer();
-            global.push_back(this);
+            global_tape.add(this);
         }
         void backward(Tensor<double,3> upstream){
             d_loss += upstream;
         }
+        static void* operator new(size_t size) { return param_arena.alloc(size); }
+        static void operator delete(void* ptr) { /* no-op */ }
 };
 
 class InputNode : public Node{
-    public: 
+    public:
         InputNode(Tensor<double, 3> value, bool requires_grad = true){
-            input = true;
             val = value;
             this->requires_grad = requires_grad;
-            this->heap_owned = true;
             init_grad_buffer();
-            global.push_back(this);
+            global_tape.add(this);
         }
         void backward(Tensor<double,3> upstream){
             d_loss += upstream;
         }
+        static void* operator new(size_t size) { return transient_arena.alloc(size); }
+        static void operator delete(void* ptr) { /* no-op */ }
 };
 
 
@@ -149,8 +192,9 @@ class AddNode : public Node{
                     val.chip(b, 0) = x_slice + y_slice;
                 }
             }
+
             init_grad_buffer();
-            global.push_back(this);
+            global_tape.add(this);
         }
         void propogate(){
             int batch = d_loss.dimension(0);
@@ -177,6 +221,8 @@ class AddNode : public Node{
                 }
             }
         }
+        static void* operator new(size_t size) { return transient_arena.alloc(size); }
+        static void operator delete(void* ptr) { /* no-op */ }
 };
 
 class MultNode : public Node{
@@ -209,7 +255,7 @@ class MultNode : public Node{
             }
 
             init_grad_buffer();
-            global.push_back(this);
+            global_tape.add(this);
         }
 
         void propogate(){
@@ -226,7 +272,7 @@ class MultNode : public Node{
                     Tensor<double,2> y_slice = yptr->val.chip(yb, 0);
                     Tensor<double,2> grad_x_slice = d_loss_slice.contract(y_slice, dx_dims);
                     int xb = (xptr->val.dimension(0) == 1) ? 0 : b;
-                    xptr->d_loss.chip(xb, 0) += grad_x_slice;
+                    xptr->d_loss.chip(xb, 0) += grad_x_slice; 
                 }
 
                 if (yptr->requires_grad) {
@@ -238,6 +284,8 @@ class MultNode : public Node{
                 }
             }
         }
+        static void* operator new(size_t size) { return transient_arena.alloc(size); }
+        static void operator delete(void* ptr) { /* no-op */ }
 };
 
 class LogNode : public Node {
@@ -249,7 +297,7 @@ class LogNode : public Node {
             if (x.requires_grad) inputs.push_back(&x);
             val = x.val.log(); // elementwise across all 3 axes at once — no loop needed
             init_grad_buffer();
-            global.push_back(this);
+            global_tape.add(this);
         }
         void propogate(){
             if (xptr->requires_grad) xptr->d_loss += d_loss * xptr->val.unaryExpr(&LogNode::derivative);
@@ -257,6 +305,8 @@ class LogNode : public Node {
         static double derivative(double val){
             return 1/val;
         }
+        static void* operator new(size_t size) { return transient_arena.alloc(size); }
+        static void operator delete(void* ptr) { /* no-op */ }
 };
 
 
@@ -272,11 +322,14 @@ class SigmoidNode : public Node {
             if (x.requires_grad) inputs.push_back(&x);
             val = x.val.unaryExpr(&sigmoid_fcn); // elementwise — no loop needed
             init_grad_buffer();
-            global.push_back(this);
+            global_tape.add(this);
         }
         void propogate(){
             if (xptr->requires_grad) xptr->d_loss += d_loss * xptr->val.unaryExpr(&sigmoid_derivative);
         }
+        static void* operator new(size_t size) { return transient_arena.alloc(size); }
+        static void operator delete(void* ptr) { /* no-op */ }
+
 };
 
 class ReLUNode : public Node {
@@ -288,11 +341,13 @@ class ReLUNode : public Node {
             if (x.requires_grad) inputs.push_back(&x);
             val = xptr->val.unaryExpr(&relu); // elementwise — no loop needed
             init_grad_buffer();
-            global.push_back(this);
+            global_tape.add(this);
         }
         void propogate(){
             if(xptr->requires_grad) xptr->d_loss += d_loss * xptr->val.unaryExpr(&relu_derivative);
         }
+        static void* operator new(size_t size) { return transient_arena.alloc(size); }
+        static void operator delete(void* ptr) { /* no-op */ }
 };
 
 class tanhNode : public Node {
@@ -304,11 +359,14 @@ class tanhNode : public Node {
             if (x.requires_grad) inputs.push_back(&x);
             val = x.val.tanh(); // elementwise — no loop needed
             init_grad_buffer();
-            global.push_back(this);
+            global_tape.add(this);
         }
         void propogate(){
             if (xptr->requires_grad) xptr->d_loss += d_loss * xptr->val.unaryExpr(&tanh_derivative);
         }
+        static void* operator new(size_t size) { return transient_arena.alloc(size); }
+        static void operator delete(void* ptr) { /* no-op */ }
+
 };
 
 class SoftmaxNode : public Node {
@@ -326,7 +384,7 @@ class SoftmaxNode : public Node {
             val = Tensor<double, 3>(batch, logits, 1);
             softmax(x.val, val);
             init_grad_buffer();
-            global.push_back(this);
+            global_tape.add(this);
         } 
         void propogate(){
             if (xptr->requires_grad) {
@@ -344,6 +402,9 @@ class SoftmaxNode : public Node {
                 }
             }
         }
+        static void* operator new(size_t size) { return transient_arena.alloc(size); }
+        static void operator delete(void* ptr) { /* no-op */ }
+
 };
 
 
@@ -368,11 +429,14 @@ class MSENode : public Node {
             val = Tensor<double,3>(1,1,1);
             val(0,0,0) = (1.0/N) * sum_sq(0);
             init_grad_buffer();
-            global.push_back(this);
+            global_tape.add(this);
         }
         void propogate(){
             if (xptr->requires_grad) xptr->d_loss += ((2*error)/N) * d_loss(0,0,0);
         }
+        static void* operator new(size_t size) { return transient_arena.alloc(size); }
+        static void operator delete(void* ptr) { /* no-op */ }
+        
 };
 
 
@@ -403,11 +467,13 @@ class CategoricalCrossEntropyNode : public Node {
             val(0,0,0) = -(1.0/N) * sum_across_batches(0);
 
             init_grad_buffer();
-            global.push_back(this);
+            global_tape.add(this);
         }
         void propogate(){
             if (xptr->requires_grad) xptr->d_loss +=  (-(yptr->val/x_clamped))/N * d_loss(0,0,0);
         }
+        static void* operator new(size_t size) { return transient_arena.alloc(size); }
+        static void operator delete(void* ptr) { /* no-op */ }
 };
 
 
@@ -438,11 +504,13 @@ class CrossEntropyNode : public Node {
             val(0,0,0) = (1.0/N) * sum_across_batches(0);
 
             init_grad_buffer();
-            global.push_back(this);
+            global_tape.add(this);
         }
         void propogate(){
             if (xptr->requires_grad) xptr->d_loss += (((error) / ((x_clamped)*(-x_clamped + 1.0)))/N) * d_loss(0,0,0);
         }
+        static void* operator new(size_t size) { return transient_arena.alloc(size); }
+        static void operator delete(void* ptr) { /* no-op */ }
 };
 
 
@@ -474,11 +542,14 @@ class SigmoidBCENode : public Node {
             val(0,0,0) = (1.0/N) * sum_across_batches(0);
 
             init_grad_buffer();
-            global.push_back(this);
+            global_tape.add(this);
         }
         void propogate(){
             if (xptr->requires_grad) xptr->d_loss += (error/N) * d_loss(0,0,0);
         }
+        static void* operator new(size_t size) { return transient_arena.alloc(size); }
+        static void operator delete(void* ptr) { /* no-op */ }
+
 };
 
 
@@ -512,11 +583,14 @@ class SoftmaxCCENode : public Node {
             val(0,0,0) = -(1.0/N) * sum_across_batches(0);
 
             init_grad_buffer();
-            global.push_back(this);
+            global_tape.add(this);
         }
         void propogate(){
             if (xptr->requires_grad) xptr->d_loss += (error/N) * d_loss(0,0,0);
         }
+        static void* operator new(size_t size) { return transient_arena.alloc(size); }
+        static void operator delete(void* ptr) { /* no-op */ }
+
 };
 
 
@@ -588,38 +662,33 @@ inline Tensor<double, 3> softmax(const Tensor<double, 3> &input){
 }
 
 inline void zero_params(){
-    for (Node* node : global){
-        if (node->param) node->d_loss.setZero();
+    for (Node* node : global_tape.tape){
+        if (node->param || node->input) node->d_loss.setZero();
     }
 }
 inline void print_gradient_params(){
-    for (Node* node : global){
+    for (Node* node : global_tape.tape){
         if (node->param) cout<<node->d_loss<<endl;
     }
 }
 inline void update_gradient_params(double learning_rate){
-    for (Node* node : global){
+    for (Node* node : global_tape.tape){
         if (node->param) node->val -= learning_rate*node->d_loss;
     }
 }
+
 inline void destroy(){
-    for (Node* node : global){
-        if (node->heap_owned) delete node;
-    }
-    global.clear();
-}
-inline void destroy_mid(){
     vector<Node*> keep;
-    keep.reserve(global.size());
-    for (Node* node : global){
-        if (node->param || node->input) keep.push_back(node);
+    keep.reserve(global_tape.tape.size());
+    for (Node* node : global_tape.tape){
+        if (node->param) keep.push_back(node);
         else delete node;
     }
-    global = std::move(keep);
+    global_tape.tape = std::move(keep);
 }
 
 inline void remove_from_global(Node* target){
-    global.erase(std::remove(global.begin(), global.end(), target), global.end());
+    global_tape.tape.erase(std::remove(global_tape.tape.begin(), global_tape.tape.end(), target), global_tape.tape.end());
 }
 
 #endif

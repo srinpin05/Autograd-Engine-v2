@@ -3,7 +3,37 @@
 #include "network.h"   // Layer, OutputLayer, Model
 
 using namespace std;
+Tape global_tape;
+// main.cpp
+Arena param_arena(16 * 1024 * 1024);        // small, permanent
+Arena transient_arena(64 * 1024 * 1024);   // per-batch, reset every iteration
+#include <fstream>
 
+void save_model(Model& model, const string& path){
+    ofstream out(path, ios::binary);
+    if (!out.is_open()){ cerr << "Failed to open " << path << " for writing.\n"; return; }
+
+    int num_layers = model.l.size();
+    out.write((char*)&num_layers, sizeof(int));
+
+    for (Layer* layer : model.l){
+        auto& w = layer->weights.val;
+        int wd0 = w.dimension(0), wd1 = w.dimension(1), wd2 = w.dimension(2);
+        out.write((char*)&wd0, sizeof(int));
+        out.write((char*)&wd1, sizeof(int));
+        out.write((char*)&wd2, sizeof(int));
+        out.write((char*)w.data(), sizeof(double) * w.size());
+
+        auto& b = layer->bias.val;
+        int bd0 = b.dimension(0), bd1 = b.dimension(1), bd2 = b.dimension(2);
+        out.write((char*)&bd0, sizeof(int));
+        out.write((char*)&bd1, sizeof(int));
+        out.write((char*)&bd2, sizeof(int));
+        out.write((char*)b.data(), sizeof(double) * b.size());
+    }
+    out.close();
+    cout << "Model saved to " << path << endl;
+}
 int main(){
     // ---- Load training data ----
     Tensor<double,1> train_x;
@@ -18,7 +48,7 @@ int main(){
 
     int input_size = size_of_sample;   // 784 for MNIST (28*28), set by loadData8bit
     int num_classes = 10;
-    int batch_size = 6000;
+    int batch_size = 32;
 
     // ---- Build model ----
     Model model(train_x, train_y);
@@ -33,13 +63,15 @@ int main(){
     OutputLayer* out = new OutputLayer(num_classes, train_y, batch_size);
     model.set_truevalues(out);
 
-    // ---- Train ----
-    int epochs = 5;
+    // ---- Train (SGD, one sample at a time) ----
+    int epochs = 10;
+    ProgressBar bar;
     double learning_rate = 0.01;
     for (int e = 0; e < epochs; e++){
-        model.train(learning_rate);
-        cout << "Epoch " << e << " last-batch loss: " << model.loss_val << endl;
+    model.train_sgd(learning_rate, bar, e, epochs);
     }
+    save_model(model, "model.bin");
+    // Debug: overfit a tiny fixed batch to sanity-check the engine
 
     // ---- Load test data ----
     Tensor<double,1> test_x;
@@ -49,37 +81,4 @@ int main(){
               "data/t10k-labels.idx1-ubyte",
               10);
     test_x = test_x / 255.0;
-
-    // ---- Evaluate accuracy on a batch of test data ----
-    int test_batch_size = 100;
-    Tensor<double,3> x_batch, y_batch;
-    load_next_batch_i(test_x, x_batch, 0, test_batch_size, input_size);
-    load_next_batch_o(test_y, y_batch, 0, test_batch_size, num_classes);
-
-    Node* test_input = new InputNode(x_batch, false);
-    layer1->activations = test_input;
-    model.forward();
-
-    int correct = 0;
-    for (int b = 0; b < test_batch_size; b++){
-        int predicted_class = 0;
-        double max_val = model.predicted_activations->val(b, 0, 0);
-        for (int c = 1; c < num_classes; c++){
-            if (model.predicted_activations->val(b, c, 0) > max_val){
-                max_val = model.predicted_activations->val(b, c, 0);
-                predicted_class = c;
-            }
-        }
-        int true_class = 0;
-        for (int c = 0; c < num_classes; c++){
-            if (y_batch(b, c, 0) == 1.0){ true_class = c; break; }
-        }
-        if (predicted_class == true_class) correct++;
-    }
-
-    cout << "Test accuracy on " << test_batch_size << " samples: "
-         << (100.0 * correct / test_batch_size) << "%" << endl;
-
-    destroy();
-    return 0;
 }
